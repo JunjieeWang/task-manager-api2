@@ -1,78 +1,68 @@
-/** task-manager-api/controllers/authController.js */
-/**
- * Controlador d'Autenticació (authController) - VERSIÓ T8
- * 
- * CANVIS RESPECTE T7:
- * - Afegit endpoint checkPermission per verificar permisos
- * - Register ara assigna el rol 'user' per defecte
- * - Respostes inclouen els rols de l'usuari
- */
-
+/** controllers/authController.js */
+const crypto = require("crypto");
 const User = require("../models/User");
 const Role = require("../models/Role");
+const TokenBlacklist = require("../models/TokenBlacklist");
+const PasswordReset = require("../models/PasswordReset");
+const jwtService = require("../services/jwtService");
 const ErrorResponse = require("../utils/errorResponse");
-const generateToken = require("../utils/generateToken");
 
-/**
- * Registre d'usuaris
- * POST /api/auth/register
- */
+async function buildTokenPair(user) {
+  await user.populate({
+    path: "roles",
+    populate: { path: "permissions", select: "name" }
+  });
+
+  const roleNames = user.roles.map(r => r.name);
+  const permissions = [];
+  for (const role of user.roles) {
+    for (const perm of role.permissions || []) {
+      if (!permissions.includes(perm.name)) permissions.push(perm.name);
+    }
+  }
+
+  const accessToken  = jwtService.generateAccessToken(user._id, roleNames, permissions);
+  const refreshToken = jwtService.generateRefreshToken(user._id);
+
+  return { accessToken, refreshToken, roleNames, permissions };
+}
+
+/** POST /api/auth/register */
 async function register(req, res, next) {
   try {
-    const { name, email, password } = req.body;
+    const { name, firstName, lastName, email, password } = req.body;
 
-    // Comprovem si l'email ja existeix
+    const displayName = name || [firstName, lastName].filter(Boolean).join(" ") || "";
+
     const exists = await User.findOne({ email });
-    if (exists) {
-      return next(new ErrorResponse("Email ja registrat", 400));
-    }
+    if (exists) return next(new ErrorResponse("Email ja registrat", 400));
 
-    // Obtenim el rol 'user' per defecte
     const defaultRole = await Role.findOne({ name: "user" });
     if (!defaultRole) {
-      return next(new ErrorResponse("Error de configuració: rol 'user' no trobat. Executa el seed.", 500));
+      return next(new ErrorResponse("Rol 'user' no trobat. Executa el seed.", 500));
     }
 
-    // Creem el nou usuari amb el rol per defecte
-    const user = await User.create({ 
-      name, 
-      email, 
+    const user = await User.create({
+      name: displayName,
+      email,
       password,
       roles: [defaultRole._id],
-      role: "user" // Camp legacy
+      role: "user"
     });
 
-    // Generem el token
-    const token = generateToken(user);
-
-    // Obtenim els permisos per la resposta
-    await user.populate({
-      path: "roles",
-      populate: {
-        path: "permissions",
-        select: "name"
-      }
-    });
-
-    const permissions = [];
-    for (const role of user.roles) {
-      for (const perm of role.permissions) {
-        if (!permissions.includes(perm.name)) {
-          permissions.push(perm.name);
-        }
-      }
-    }
+    const { accessToken, refreshToken, roleNames, permissions } = await buildTokenPair(user);
 
     return res.status(201).json({
       success: true,
-      token,
+      accessToken,
+      refreshToken,
+      expiresIn: 900,
       user: {
         _id: user._id,
         name: user.name,
         email: user.email,
-        roles: user.roles.map(r => r.name),
-        permissions,
-        role: user.role // Legacy
+        roles: roleNames,
+        permissions
       }
     });
   } catch (err) {
@@ -80,60 +70,30 @@ async function register(req, res, next) {
   }
 }
 
-/**
- * Inici de sessió (Login)
- * POST /api/auth/login
- */
+/** POST /api/auth/login */
 async function login(req, res, next) {
   try {
     const { email, password } = req.body;
 
-    // Busquem l'usuari amb contrasenya i rols
-    const user = await User.findOne({ email })
-      .select("+password")
-      .populate({
-        path: "roles",
-        populate: {
-          path: "permissions",
-          select: "name"
-        }
-      });
-    
-    if (!user) {
-      return next(new ErrorResponse("Credencials invàlides", 401));
-    }
+    const user = await User.findOne({ email }).select("+password");
+    if (!user) return next(new ErrorResponse("Credencials invàlides", 401));
 
-    // Comparem la contrasenya
     const ok = await user.comparePassword(password);
-    if (!ok) {
-      return next(new ErrorResponse("Credencials invàlides", 401));
-    }
+    if (!ok) return next(new ErrorResponse("Credencials invàlides", 401));
 
-    // Generem el token
-    const token = generateToken(user);
-
-    // Obtenim els permisos
-    const permissions = [];
-    for (const role of user.roles) {
-      if (role.permissions) {
-        for (const perm of role.permissions) {
-          if (!permissions.includes(perm.name)) {
-            permissions.push(perm.name);
-          }
-        }
-      }
-    }
+    const { accessToken, refreshToken, roleNames, permissions } = await buildTokenPair(user);
 
     return res.json({
       success: true,
-      token,
+      accessToken,
+      refreshToken,
+      expiresIn: 900,
       user: {
         _id: user._id,
         name: user.name,
         email: user.email,
-        roles: user.roles.map(r => r.name),
-        permissions,
-        role: user.role // Legacy
+        roles: roleNames,
+        permissions
       }
     });
   } catch (err) {
@@ -141,30 +101,149 @@ async function login(req, res, next) {
   }
 }
 
-/**
- * Obtenir perfil de l'usuari actual
- * GET /api/auth/me
- */
-async function getMe(req, res) {
-  return res.json({ 
-    success: true, 
-    user: req.user 
-  });
+/** POST /api/auth/refresh */
+async function refresh(req, res, next) {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return next(new ErrorResponse("refreshToken requerit", 400));
+
+    let decoded;
+    try {
+      decoded = jwtService.verifyRefreshToken(refreshToken);
+    } catch (e) {
+      if (e.name === "TokenExpiredError") {
+        return res.status(401).json({ success: false, error: "Token expired", code: "TOKEN_EXPIRED" });
+      }
+      return next(new ErrorResponse("Refresh token invàlid", 401));
+    }
+
+    if (decoded.tokenType !== "refresh") {
+      return next(new ErrorResponse("Token invàlid: no és un refresh token", 401));
+    }
+
+    const blacklisted = await TokenBlacklist.findOne({ token: refreshToken });
+    if (blacklisted) return next(new ErrorResponse("Token revocat", 401));
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return next(new ErrorResponse("Usuari no trobat", 401));
+
+    const { accessToken, roleNames, permissions } = await buildTokenPair(user);
+
+    return res.json({ success: true, accessToken, expiresIn: 900 });
+  } catch (err) {
+    return next(err);
+  }
 }
 
-/**
- * Actualitzar perfil d'usuari
- * PUT /api/auth/profile
- */
+/** POST /api/auth/logout */
+async function logout(req, res, next) {
+  try {
+    const accessToken  = req.token;
+    const { refreshToken } = req.body;
+
+    const now = Date.now();
+
+    if (accessToken) {
+      await TokenBlacklist.create({
+        token: accessToken,
+        userId: req.user._id,
+        revokedAt: new Date(),
+        expiresAt: new Date(now + 15 * 60 * 1000)
+      });
+    }
+
+    if (refreshToken) {
+      await TokenBlacklist.create({
+        token: refreshToken,
+        userId: req.user._id,
+        revokedAt: new Date(),
+        expiresAt: new Date(now + 7 * 24 * 60 * 60 * 1000)
+      });
+    }
+
+    return res.json({ success: true, message: "Sessió tancada correctament" });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/** POST /api/auth/forgot-password */
+async function forgotPassword(req, res, next) {
+  try {
+    const { email } = req.body;
+    if (!email) return next(new ErrorResponse("Email requerit", 400));
+
+    const user = await User.findOne({ email });
+
+    // Sempre retornem 200 per seguretat (no revelar si l'email existeix)
+    if (!user) {
+      return res.json({ success: true, message: "Si l'email existeix, rebràs un correu" });
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+    await PasswordReset.deleteMany({ userId: user._id });
+    await PasswordReset.create({ userId: user._id, token, expiresAt });
+
+    // En producció s'enviaria un email. Per a proves, incloem el token a la resposta.
+    console.log(`[PasswordReset] Token per ${email}: ${token}`);
+
+    return res.json({
+      success: true,
+      message: "Email enviat amb les instruccions per restablir la contrasenya",
+      resetToken: token // Inclòs per a proves (treure en producció)
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/** POST /api/auth/reset-password/:token */
+async function resetPassword(req, res, next) {
+  try {
+    const { token } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword) return next(new ErrorResponse("newPassword requerit", 400));
+    if (newPassword.length < 6) return next(new ErrorResponse("Password mínim 6 caràcters", 400));
+
+    const reset = await PasswordReset.findOne({
+      token,
+      expiresAt: { $gt: new Date() },
+      usedAt: null
+    });
+
+    if (!reset) return next(new ErrorResponse("Token invàlid o expirat", 400));
+
+    const user = await User.findById(reset.userId);
+    if (!user) return next(new ErrorResponse("Usuari no trobat", 404));
+
+    user.password = newPassword;
+    await user.save();
+
+    reset.usedAt = new Date();
+    await reset.save();
+
+    return res.json({ success: true, message: "Contrasenya actualitzada correctament" });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/** GET /api/auth/me */
+async function getMe(req, res) {
+  return res.json({ success: true, user: req.user });
+}
+
+/** PUT /api/auth/profile */
 async function updateProfile(req, res, next) {
   try {
     const { name, email } = req.body;
 
     if (email) {
       const exists = await User.findOne({ email, _id: { $ne: req.user._id } });
-      if (exists) {
-        return next(new ErrorResponse("Email ja en ús", 400));
-      }
+      if (exists) return next(new ErrorResponse("Email ja en ús", 400));
     }
 
     const update = {};
@@ -172,47 +251,30 @@ async function updateProfile(req, res, next) {
     if (email !== undefined) update.email = email;
 
     const updated = await User.findByIdAndUpdate(req.user._id, update, {
-      new: true,
-      runValidators: true,
+      new: true, runValidators: true
     }).populate("roles", "name");
 
-    if (!updated) {
-      return next(new ErrorResponse("Usuari no trobat", 404));
-    }
+    if (!updated) return next(new ErrorResponse("Usuari no trobat", 404));
 
     return res.json({
       success: true,
-      user: {
-        _id: updated._id,
-        name: updated.name,
-        email: updated.email,
-        roles: updated.roles.map(r => r.name),
-        role: updated.role
-      }
+      user: { _id: updated._id, name: updated.name, email: updated.email, roles: updated.roles.map(r => r.name) }
     });
   } catch (err) {
     return next(err);
   }
 }
 
-/**
- * Canviar contrasenya
- * PUT /api/auth/change-password
- */
+/** PUT /api/auth/change-password */
 async function changePassword(req, res, next) {
   try {
     const { currentPassword, newPassword } = req.body;
 
     const user = await User.findById(req.user._id).select("+password");
-    
-    if (!user) {
-      return next(new ErrorResponse("Usuari no trobat", 404));
-    }
+    if (!user) return next(new ErrorResponse("Usuari no trobat", 404));
 
     const ok = await user.comparePassword(currentPassword);
-    if (!ok) {
-      return next(new ErrorResponse("currentPassword incorrecte", 401));
-    }
+    if (!ok) return next(new ErrorResponse("currentPassword incorrecte", 401));
 
     user.password = newPassword;
     await user.save();
@@ -223,59 +285,31 @@ async function changePassword(req, res, next) {
   }
 }
 
-/**
- * Verificar si l'usuari té un permís específic
- * POST /api/auth/check-permission
- */
+/** POST /api/auth/check-permission */
 async function checkPermission(req, res, next) {
   try {
     const { permission } = req.body;
+    if (!permission) return next(new ErrorResponse("Cal especificar el permís", 400));
 
-    if (!permission) {
-      return next(new ErrorResponse("Cal especificar el permís a verificar", 400));
-    }
-
-    // req.user.permissions ja hauria d'estar carregat pel middleware auth
-    const hasPermission = req.user.permissions && req.user.permissions.includes(permission);
+    const hasPermission = req.user.permissions?.includes(permission);
 
     if (hasPermission) {
-      return res.json({
-        success: true,
-        hasPermission: true,
-        message: "Tens permís per fer aquesta acció"
-      });
-    } else {
-      return res.status(403).json({
-        success: false,
-        hasPermission: false,
-        message: "No tens permís per fer aquesta acció"
-      });
+      return res.json({ success: true, hasPermission: true, message: "Tens permís per fer aquesta acció" });
     }
+    return res.status(403).json({ success: false, hasPermission: false, message: "No tens permís" });
   } catch (err) {
     return next(err);
   }
 }
 
-/**
- * Obtenir tots els permisos de l'usuari actual
- * GET /api/auth/my-permissions
- */
+/** GET /api/auth/my-permissions */
 async function getMyPermissions(req, res) {
-  return res.json({
-    success: true,
-    data: {
-      roles: req.user.roles,
-      permissions: req.user.permissions
-    }
-  });
+  return res.json({ success: true, data: { roles: req.user.roles, permissions: req.user.permissions } });
 }
 
 module.exports = {
-  register,
-  login,
-  getMe,
-  updateProfile,
-  changePassword,
-  checkPermission,
-  getMyPermissions
+  register, login, refresh, logout,
+  forgotPassword, resetPassword,
+  getMe, updateProfile, changePassword,
+  checkPermission, getMyPermissions
 };

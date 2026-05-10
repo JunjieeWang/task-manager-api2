@@ -1,80 +1,113 @@
 /** task-manager-api/middleware/validators/authValidators.js */
 /**
- * Validadors d'Autenticació (authValidators)
- * Defineix les regles de validació per a les rutes d'autenticació
- * Utilitza express-validator per validar i sanititzar dades d'entrada
+ * Validation rules for authentication and admin user management.
  */
 
 const { body } = require("express-validator");
 const { handleValidation } = require("./_common");
 
-/**
- * Validació per al registre d'usuaris
- * - email: obligatori, ha de ser un email vàlid
- * - password: obligatori, mínim 6 caràcters
- * - name: opcional, mínim 2 caràcters si s'envia
- */
 const registerValidation = [
   body("email")
-    .isEmail().withMessage("Email inválido")
-    .normalizeEmail(),  // Sanititza l'email (minúscules, elimina punts en gmail, etc.)
-  
-  body("password")
-    .isLength({ min: 6 }).withMessage("Password mínimo 6 caracteres"),
-  
-  body("name")
-    .optional()  // El camp és opcional
-    .isLength({ min: 2 }).withMessage("Name mínimo 2 caracteres"),
-  
-  handleValidation,  // Processa els errors de validació
-];
-
-/**
- * Validació per al login
- * - email: obligatori, ha de ser un email vàlid
- * - password: obligatori, no pot estar buit
- */
-const loginValidation = [
-  body("email")
-    .isEmail().withMessage("Email inválido")
+    .isEmail().withMessage("Email invalido")
     .normalizeEmail(),
-  
+
   body("password")
-    .notEmpty().withMessage("Password requerido"),
-  
+    .isLength({ min: 6 }).withMessage("Password minimo 6 caracteres"),
+
+  body("name")
+    .optional()
+    .isLength({ min: 2 }).withMessage("Name minimo 2 caracteres"),
+
+  body("firstName")
+    .optional()
+    .isLength({ min: 1 }).withMessage("firstName invalido"),
+
+  body("lastName")
+    .optional()
+    .isLength({ min: 1 }).withMessage("lastName invalido"),
+
   handleValidation,
 ];
 
-/**
- * Validació per actualitzar el perfil
- * - email: opcional, ha de ser un email vàlid si s'envia
- * - name: opcional, mínim 2 caràcters si s'envia
- */
+const loginValidation = [
+  body("email")
+    .isEmail().withMessage("Email invalido")
+    .normalizeEmail(),
+
+  body("password")
+    .notEmpty().withMessage("Password requerido"),
+
+  handleValidation,
+];
+
 const updateProfileValidation = [
   body("email")
     .optional()
-    .isEmail().withMessage("Email inválido")
+    .isEmail().withMessage("Email invalido")
     .normalizeEmail(),
-  
+
   body("name")
     .optional()
-    .isLength({ min: 2 }).withMessage("Name mínimo 2 caracteres"),
-  
+    .isLength({ min: 2 }).withMessage("Name minimo 2 caracteres"),
+
   handleValidation,
 ];
 
-/**
- * Validació per canviar la contrasenya
- * - currentPassword: obligatori, no pot estar buit
- * - newPassword: obligatori, mínim 6 caràcters
- */
 const changePasswordValidation = [
   body("currentPassword")
     .notEmpty().withMessage("currentPassword requerido"),
-  
+
   body("newPassword")
-    .isLength({ min: 6 }).withMessage("newPassword mínimo 6 caracteres"),
-  
+    .isLength({ min: 6 }).withMessage("newPassword minimo 6 caracteres"),
+
+  handleValidation,
+];
+
+const adminCreateUserValidation = [
+  body("email")
+    .isEmail().withMessage("Email invalido")
+    .normalizeEmail(),
+
+  body("password")
+    .isLength({ min: 6 }).withMessage("Password minimo 6 caracteres"),
+
+  body("name")
+    .optional()
+    .isLength({ min: 2 }).withMessage("Name minimo 2 caracteres"),
+
+  body("roles")
+    .optional()
+    .isArray({ min: 1 }).withMessage("roles ha de ser un array amb almenys un element"),
+
+  body("roles.*")
+    .optional()
+    .isString().withMessage("Cada rol ha de ser un string"),
+
+  handleValidation,
+];
+
+const adminUpdateUserValidation = [
+  body("email")
+    .optional()
+    .isEmail().withMessage("Email invalido")
+    .normalizeEmail(),
+
+  body("password")
+    .optional()
+    .isLength({ min: 6 }).withMessage("Password minimo 6 caracteres"),
+
+  body("name")
+    .optional()
+    .isLength({ min: 2 }).withMessage("Name minimo 2 caracteres"),
+
+  body("roles")
+    .optional()
+    .isArray({ min: 1 }).withMessage("roles ha de ser un array amb almenys un element"),
+
+  body("roles.*")
+    .optional()
+    .isString().withMessage("Cada rol ha de ser un string"),
+
   handleValidation,
 ];
 
@@ -83,4 +116,6 @@ module.exports = {
   loginValidation,
   updateProfileValidation,
   changePasswordValidation,
+  adminCreateUserValidation,
+  adminUpdateUserValidation,
 };

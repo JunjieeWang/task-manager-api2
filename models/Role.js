@@ -36,6 +36,20 @@ const roleSchema = new mongoose.Schema(
       ref: "Permission"
     }],
 
+    // Nivell jeràrquic: VIEWER(1) < USER(2) < MANAGER(3) < ADMIN(4) < SUPER_ADMIN(5)
+    level: {
+      type: Number,
+      default: 1,
+      min: 1
+    },
+
+    // Rol pare del qual hereta permisos
+    parentRole: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Role",
+      default: null
+    },
+
     // Indica si és un rol del sistema (no es pot eliminar ni renombrar)
     isSystem: {
       type: Boolean,

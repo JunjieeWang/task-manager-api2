@@ -5,6 +5,7 @@ const router = express.Router();
 
 // Middlewares
 const auth = require("../middleware/auth");
+const { roleLimiter } = require("../middleware/rateLimiter");
 const checkPermission = require("../middleware/checkPermission");
 const auditLog = require("../middleware/auditLog");
 const { 
@@ -29,6 +30,7 @@ const {
 // MIDDLEWARE D'AUTENTICACIÓ PER TOTES LES RUTES
 // ============================================
 router.use(auth);
+router.use(roleLimiter);
 
 // ============================================
 // RUTES DE TASQUES

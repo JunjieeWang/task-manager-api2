@@ -20,12 +20,25 @@ const ErrorResponse = require("../utils/errorResponse");
  */
 async function createRole(req, res, next) {
   try {
-    const { name, description, permissions } = req.body;
+    const { name, description, permissions, level, parentRole } = req.body;
 
     // Comprovem si el nom ja existeix
     const exists = await Role.findOne({ name: name.toLowerCase() });
     if (exists) {
       return next(new ErrorResponse("Ja existeix un rol amb aquest nom", 400));
+    }
+
+    // Validar jerarquia: el parentRole ha de tenir un nivell inferior al del nou rol
+    if (parentRole) {
+      const parent = await Role.findById(parentRole);
+      if (!parent) return next(new ErrorResponse("parentRole no trobat", 404));
+      const newLevel = level ?? 1;
+      if (parent.level >= newLevel) {
+        return next(new ErrorResponse(
+          `Jerarquia invàlida: el rol pare (level ${parent.level}) ha de tenir un nivell inferior al nou rol (level ${newLevel})`,
+          400
+        ));
+      }
     }
 
     // Validem que els permisos existeixin
@@ -55,7 +68,9 @@ async function createRole(req, res, next) {
     const role = await Role.create({
       name,
       description,
-      permissions: permissionIds
+      permissions: permissionIds,
+      level: level ?? 1,
+      parentRole: parentRole || null
     });
 
     // Poblem els permisos per la resposta
@@ -334,6 +349,96 @@ async function removePermissionsFromRole(req, res, next) {
   }
 }
 
+/**
+ * Obté recursivament tots els permisos heretats d'un rol
+ * @param {string} roleId
+ * @param {Set} visited - per evitar cicles
+ */
+async function collectInheritedPermissions(roleId, visited = new Set()) {
+  if (!roleId || visited.has(String(roleId))) return [];
+  visited.add(String(roleId));
+
+  const role = await Role.findById(roleId).populate("permissions", "name description category");
+  if (!role) return [];
+
+  const perms = [...(role.permissions || [])];
+
+  if (role.parentRole) {
+    const parentPerms = await collectInheritedPermissions(role.parentRole, visited);
+    perms.push(...parentPerms);
+  }
+
+  return perms;
+}
+
+/**
+ * GET /api/roles/:id/hierarchy
+ * Retorna la cadena de rols pare fins a l'arrel
+ */
+async function getRoleHierarchy(req, res, next) {
+  try {
+    const chain = [];
+    let currentId = req.params.id;
+    const visited = new Set();
+
+    while (currentId && !visited.has(String(currentId))) {
+      visited.add(String(currentId));
+      const role = await Role.findById(currentId)
+        .populate("permissions", "name")
+        .populate("parentRole", "name level");
+
+      if (!role) break;
+      chain.push({
+        _id: role._id,
+        name: role.name,
+        level: role.level,
+        permissions: role.permissions.map(p => p.name),
+        parentRole: role.parentRole ? { _id: role.parentRole._id, name: role.parentRole.name, level: role.parentRole.level } : null
+      });
+      currentId = role.parentRole?._id || null;
+    }
+
+    if (chain.length === 0) return next(new ErrorResponse("Rol no trobat", 404));
+
+    res.json({ success: true, data: chain });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/roles/:id/permissions
+ * Retorna permisos propis + heretats de la jerarquia
+ */
+async function getRoleAllPermissions(req, res, next) {
+  try {
+    const role = await Role.findById(req.params.id);
+    if (!role) return next(new ErrorResponse("Rol no trobat", 404));
+
+    const allPerms = await collectInheritedPermissions(req.params.id);
+
+    // Deduplicar per nom
+    const seen = new Set();
+    const unique = allPerms.filter(p => {
+      const key = p.name || String(p._id);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    res.json({
+      success: true,
+      data: {
+        role: role.name,
+        level: role.level,
+        permissions: unique
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   createRole,
   getAllRoles,
@@ -341,5 +446,7 @@ module.exports = {
   updateRole,
   deleteRole,
   addPermissionsToRole,
-  removePermissionsFromRole
+  removePermissionsFromRole,
+  getRoleHierarchy,
+  getRoleAllPermissions
 };
